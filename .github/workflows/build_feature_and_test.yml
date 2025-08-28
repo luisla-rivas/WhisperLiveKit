@@ -1,0 +1,49 @@
+name: Build and Test (feature branches)
+
+on:
+  push:
+    branches:
+      - 'feature/**'
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build and smoke-test on Ubuntu 24.04
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libsndfile1
+
+      - name: Upgrade pip
+        run: |
+          python -m pip install --upgrade pip
+
+      - name: Install project
+        run: |
+          pip install '.[sentence]'
+
+      - name: Smoke test import
+        run: |
+          python - <<'PY'
+          import whisperlivekit
+          print("Imported whisperlivekit", getattr(whisperlivekit, "__version__", "unknown"))
+          PY
+
+      - name: Smoke test CLI --help
+        run: |
+          whisperlivekit-server --help
