@@ -1,0 +1,28 @@
+FROM python:3.10-slim
+ENV HF_HOME=/models TRANSFORMERS_CACHE=/models PYTHONUNBUFFERED=1
+
+# Dependencias básicas
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
+
+# Paquetes Python
+RUN pip install --no-cache-dir \
+    faster-whisper \
+    silero-vad \
+    fastapi \
+    uvicorn[standard] \
+    websockets \
+    soundfile \
+    numpy \
+    huggingface_hub
+
+WORKDIR /app
+COPY asr_whisper_service /app/asr_whisper_service
+
+# Copiar el entrypoint desde scripts/ al raíz de la imagen
+COPY ./scripts/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 8000
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["uvicorn", "asr_whisper_service.server:app", "--host", "0.0.0.0", "--port", "8000"]
