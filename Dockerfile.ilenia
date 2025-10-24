@@ -1,28 +1,121 @@
-FROM python:3.10-slim
-ENV HF_HOME=/models TRANSFORMERS_CACHE=/models PYTHONUNBUFFERED=1
+# Base SOLO runtime (mucho más pequeña que *-devel*)
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
-# Dependencias básicas
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && \
-    rm -rf /var/lib/apt/lists/*
-
-# Paquetes Python
-RUN pip install --no-cache-dir \
-    faster-whisper \
-    silero-vad \
-    fastapi \
-    uvicorn[standard] \
-    websockets \
-    soundfile \
-    numpy \
-    huggingface_hub
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
 
 WORKDIR /app
-COPY asr_whisper_service /app/asr_whisper_service
 
-# Copiar el entrypoint desde scripts/ al raíz de la imagen
-COPY ./scripts/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+ARG EXTRAS
+ARG HF_PRECACHE_DIR
+ARG HF_TKN_FILE
 
+#ENV HF_HOME="/app/tmp/cache/huggingface"
+#ENV HF_HUB_CACHE="/app/tmp/cache/huggingface/hub"
+#ENV XDG_CACHE_HOME="/app/tmp/cache/huggingface"
+#ENV LIBROSA_CACHE_DIR="/app/tmp/librosa_cache"
+#ENV NUMBA_CACHE_DIR="/app/tmp/numba_cache"
+#ENV HF_HUB_ETAG_TIMEOUT="600"
+#ENV HF_HUB_DOWNLOAD_TIMEOUT="600"
+
+# Paquetes mínimos.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-venv \
+        ffmpeg \
+#        git \
+#        build-essential \
+#        python3-dev \
+        ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# No torch, we use fast-whisper with CTranslate2
+# RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+RUN pip3 install --no-cache-dir \
+      'faster-whisper>=1.0.0' \
+      # CTranslate2 con CUDA (ajusta cu12X a tu versión disponible):
+      --extra-index-url https://download.ctranslate2.com/whl/cu124 \
+      ctranslate2
+
+COPY . .
+
+#RUN mkdir -p $HF_HOME && \
+#    mkdir -p $HF_HUB_CACHE && \
+#    mkdir -p $XDG_CACHE_HOME && \
+#    mkdir -p $LIBROSA_CACHE_DIR && \
+#    mkdir -p $NUMBA_CACHE_DIR && \
+#    chmod 777 $HF_HOME && \
+#    chmod 777 $HF_HUB_CACHE && \
+#    chmod 777 $XDG_CACHE_HOME && \
+#    chmod 777 $LIBROSA_CACHE_DIR && \
+#    chmod 777 $NUMBA_CACHE_DIR && \
+#    chmod -R 777 /app
+
+# Install WhisperLiveKit directly, allowing for optional dependencies
+#   Note: For gates modedls, need to add your HF toke. See README.md
+#         for more details.
+#RUN if [ -n "$EXTRAS" ]; then \
+#      echo "Installing with extras: [$EXTRAS]"; \
+#      pip install --no-cache-dir whisperlivekit[$EXTRAS]; \
+#    else \
+#      echo "Installing base package only"; \
+#      pip install --no-cache-dir whisperlivekit; \
+#    fi
+
+RUN pip install --no-deps whisperlivekit==0.2.12 && \
+    pip install --no-cache-dir \
+        fastapi==0.119.1 uvicorn==0.38.0 websockets==15.0.1 \
+        soundfile==0.13.1 tiktoken==0.12.0 librosa==0.11.0 \
+        # you already have faster-whisper + ctranslate2
+        && true
+
+# In-container caching for Hugging Face models by: 
+# A) Make the cache directory persistent via an anonymous volume.
+#    Note: This only persists for a single, named container. This is 
+#          only for convenience at de/test stage. 
+#          For prod, it is better to use a named volume via host mount/k8s.
+#VOLUME ["/root/.cache/huggingface/hub"]
+
+# or
+# B) Conditionally copy a local pre-cache from the build context to the 
+#    container's cache via the HF_PRECACHE_DIR build-arg.
+#    WARNING: This will copy ALL files in the pre-cache location.
+
+# Conditionally copy a cache directory if provided
+RUN if [ -n "$HF_PRECACHE_DIR" ]; then \
+      echo "Copying Hugging Face cache from $HF_PRECACHE_DIR"; \
+      mkdir -p /root/.cache/huggingface/hub && \
+      cp -r $HF_PRECACHE_DIR/* /root/.cache/huggingface/hub; \
+    else \
+      echo "No local Hugging Face cache specified, skipping copy"; \
+    fi
+
+# Conditionally copy a Hugging Face token if provided
+
+RUN if [ -n "$HF_TKN_FILE" ]; then \
+      echo "Copying Hugging Face token from $HF_TKN_FILE"; \
+      mkdir -p /root/.cache/huggingface && \
+      cp $HF_TKN_FILE /root/.cache/huggingface/token; \
+    else \
+      echo "No Hugging Face token file specified, skipping token setup"; \
+    fi
+    
+# Expose port for the transcription server
 EXPOSE 8000
-ENTRYPOINT ["/entrypoint.sh"]
-CMD ["uvicorn", "asr_whisper_service.server:app", "--host", "0.0.0.0", "--port", "8000"]
+
+ENTRYPOINT ["whisperlivekit-server", "--host", "0.0.0.0"]
+
+# Default args
+# CMD ["--model", "projecte-aina/faster-whisper-large-v3-tiny-caesar", \
+CMD ["--model", "BSC-LT/faster-whisper-large-v3-ca-punctuated-3370h", \
+     "--language", "ca"]
+#CMD ["--model", "BSC-LT/faster-whisper-large-v3-ca-punctuated-3370h", \
+#     "--language", "ca", \
+#     "--model_cascaded_translation", "projecte-aina/aina-translator-ca-en", \
+#     "--buffer_trimming_sec", "2"]
